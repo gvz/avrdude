@@ -37,6 +37,9 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#ifdef __linux__
+#include <linux/serial.h>
+#endif
 
 #include <fcntl.h>
 #include <termios.h>
@@ -52,8 +55,13 @@ struct baud_mapping {
   speed_t speed;
 };
 
-/* There are a lot more baud rates we could handle, but what's the point? */
+static struct termios original_termios;
+static int saved_original_termios;
 
+#if !defined __linux__
+/* The support for other baud rates is imlemented for linux only.
+ * For linux this mapping is no longer needed
+ * For mac os x some other rates may also work*/
 static struct baud_mapping baud_lookup_table [] = {
   { 1200,   B1200 },
   { 2400,   B2400 },
@@ -73,8 +81,6 @@ static struct baud_mapping baud_lookup_table [] = {
   { 0,      0 }                 /* Terminator. */
 };
 
-static struct termios original_termios;
-static int saved_original_termios;
 
 static speed_t serial_baud_lookup(long baud)
 {
@@ -96,12 +102,19 @@ static speed_t serial_baud_lookup(long baud)
 
   return baud;
 }
+#endif
 
 static int ser_setspeed(union filedescriptor *fd, long baud)
 {
   int rc;
   struct termios termios;
+#if defined __linux__
+  /* for linux no conversion is needed*/
+  speed_t speed = baud;
+#else
+  /* converting the baud rate to the bit set needed by posix way*/
   speed_t speed = serial_baud_lookup (baud);
+#endif
   
   if (!isatty(fd->ifd))
     return -ENOTTY;
@@ -129,16 +142,63 @@ static int ser_setspeed(union filedescriptor *fd, long baud)
   termios.c_cflag = (CS8 | CREAD | CLOCAL);
   termios.c_cc[VMIN]  = 1;
   termios.c_cc[VTIME] = 0;
+#ifdef __linux__
+  /* Support for custom baud rate for linux is implemented by setting a dummy baud rate of 38400 and manupulating the custom divider of the serial interface*/
+  struct serial_struct  ss;
+  int ioret = ioctl(fd->ifd, TIOCGSERIAL, &ss);
+  if (ioret < 0){
+    fprintf(stderr, "Cannot get serial port settings. ioctl returned %d\n", ioret);
+    return -errno;
+  }
+  ss.flags = (ss.flags & ~ASYNC_SPD_MASK) | ASYNC_SPD_CUST;
+  ss.custom_divisor = (ss.baud_base + (speed / 2)) / speed;
+  unsigned int closestSpeed = ss.baud_base / ss.custom_divisor;
 
-  cfsetospeed(&termios, speed);
-  cfsetispeed(&termios, speed);
-
+  if (closestSpeed < speed * 98 / 100 || closestSpeed > speed * 102 / 100) {
+    fprintf(stderr, "Cannot set serial port speed to %d. Closest possible is %d\n", speed, closestSpeed);
+    return -errno;
+  }
+  ioret= ioctl(fd->ifd, TIOCSSERIAL, &ss);
+  if (ioret < 0){
+    fprintf(stderr, "Cannot set serial port speed to %d. ioctl returned %d\n", speed, ioret);
+    return -errno;
+  }
+  if (cfsetispeed(&termios, B38400) < 0){
+    fprintf(stderr, "cfsetispeed: failed to set dummy baud\n");
+    return -errno;
+  }
+  if (cfsetospeed(&termios, B38400) < 0){
+    fprintf(stderr, "cfsetospeed: failed to set dummy baud\n");
+    return -errno;
+  }
+#else
+  if (cfsetospeed(&termios, speed) < 0){
+    fprintf(stderr, "cfsetospeed: failed to set speed: %d\n",speed);
+    return -errno;
+  }
+  if (cfsetispeed(&termios, speed) < 0){
+    fprintf(stderr, "cfsetispeed: failed to set speed: %d\n",speed);
+    return -errno;
+  }
+#endif 
   rc = tcsetattr(fd->ifd, TCSANOW, &termios);
   if (rc < 0) {
     avrdude_message("%s: ser_setspeed(): tcsetattr() failed\n",
             progname);
     return -errno;
   }
+#ifdef __linux__
+  /* a bit more linux specific stuff to set custom baud rates*/ 
+  if (ioctl(fd->ifd, TIOCGSERIAL, &ss) < 0){
+    fprintf(stderr, "ioctl: failed to get port settins\n");
+    return -errno;
+  }
+  ss.flags &= ~ASYNC_SPD_MASK;
+  if (ioctl(fd->ifd, TIOCSSERIAL, &ss) < 0){
+    fprintf(stderr, "ioctl: failed to set port settins\n");
+    return -errno;
+  }
+#endif
 
   /*
    * Everything is now set up for a local line without modem control
