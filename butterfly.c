@@ -152,11 +152,19 @@ static int butterfly_vfy_led(PROGRAMMER * pgm, int value)
  */
 static int butterfly_chip_erase(PROGRAMMER * pgm, AVRPART * p)
 {
+  AVRMEM * mem;
+  char mem_type[]="flash";
+  mem = avr_locate_mem(p, (char *)(&mem_type));
+  long old_serial_recv_timeout= serial_recv_timeout;
+  if (serial_recv_timeout < mem->num_pages*10){
+    serial_recv_timeout=mem->num_pages*10;
+  }
   butterfly_send(pgm, "e", 1);
+  int ret=0;
   if (butterfly_vfy_cmd_sent(pgm, "chip erase") < 0)
-      return -1;
-
-  return 0;
+	  ret=-1;
+  serial_recv_timeout=old_serial_recv_timeout;
+  return ret;
 }
 
 
