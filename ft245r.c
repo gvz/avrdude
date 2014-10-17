@@ -67,6 +67,8 @@
 #include "ft245r.h"
 #include "usbdevs.h"
 
+static int ft245r_parseextparms(PROGRAMMER * pgm, LISTID extparms);
+
 #if defined(_WIN32)
 #include <windows.h>
 #endif
@@ -272,6 +274,54 @@ static int ft245r_set_bitclock(PROGRAMMER * pgm) {
         return -1;
     }
     return 0;
+}
+
+static int ft245r_parseextparms(PROGRAMMER * pgm, LISTID extparms)
+{
+  LNODEID ln;
+  const char *extended_param;
+  int rv = 0;
+
+  for (ln = lfirst(extparms); ln; ln = lnext(ln)) {
+    extended_param = ldata(ln);
+
+    if (strncmp(extended_param, "serial=", strlen("serial=")) == 0) {
+      if (strlen(extended_param) != (strlen("serial=") + 8)){
+        avrdude_message(MSG_INFO,
+                "%s: ft245r_parseextparms(): serial has invalid length '%s'\n",
+                progname, extended_param);
+        rv = -1;
+        continue;
+
+      }
+      char serial[9] = {0};
+      if ((sscanf(extended_param, "serial=%s", serial)
+          != 1) && (strlen(serial) == 8)) {
+        avrdude_message(MSG_INFO,
+                "%s: ft245r_parseextparms(): invalid serial '%s'\n",
+                progname, serial);
+        rv = -1;
+        continue;
+      }
+      if (verbose >= 2) {
+        avrdude_message(MSG_INFO,
+                "%s: ft245r_parseextparms(): serial number parsed as:\n"
+                "%s %s\n",
+                progname,
+                progbuf, serial);
+      }
+      strcpy(pgm->usbsn, serial);
+
+      continue;
+    }
+
+    avrdude_message(MSG_INFO,
+            "%s: ft245r_parseextparms(): invalid extended parameter '%s'\n",
+            progname, extended_param);
+    rv = -1;
+  }
+
+  return rv;
 }
 
 static int set_pin(PROGRAMMER * pgm, int pinname, int val) {
@@ -954,6 +1004,7 @@ void ft245r_initpgm(PROGRAMMER * pgm) {
     pgm->vfy_led        = set_led_vfy;
     pgm->powerup        = ft245r_powerup;
     pgm->powerdown      = ft245r_powerdown;
+    pgm->parseextparams = ft245r_parseextparms;
 
     handle = NULL;
 }
